@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"goflow/backend/internal/service"
 	httptransport "goflow/backend/internal/transport/http"
 )
 
@@ -21,9 +22,14 @@ func New(c *Container) (*App, error) {
 	}
 
 	mux := http.NewServeMux()
+	var authSvc *service.AuthService
+	if c.Users != nil && c.Sessions != nil {
+		authSvc = service.NewAuthService(c.Users, c.Sessions, c.Config)
+	}
 	httptransport.Register(mux, &httptransport.Deps{
 		Config: c.Config,
 		Logger: c.Logger,
+		Auth:   authSvc,
 	})
 
 	addr := fmt.Sprintf(":%s", c.Config.App.Port)
