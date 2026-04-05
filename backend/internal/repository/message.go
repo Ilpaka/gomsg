@@ -2,15 +2,18 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"goflow/backend/internal/domain"
 )
 
 // MessageListOpts controls listing messages in a chat (newest first).
 // BeforeID, when set, returns messages strictly older than that message (same chat).
+// BeforeTime, when set and BeforeID is nil, returns messages with created_at strictly less than BeforeTime.
 type MessageListOpts struct {
-	Limit    int
-	BeforeID *domain.ID
+	Limit      int
+	BeforeID   *domain.ID
+	BeforeTime *time.Time
 }
 
 // MessageRepository persists chat messages.

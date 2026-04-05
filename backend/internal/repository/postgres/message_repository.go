@@ -73,11 +73,22 @@ FROM messages m
 WHERE m.chat_id = $1::uuid
   AND m.deleted_at IS NULL
   AND (
-    $2::uuid IS NULL
-    OR (m.created_at, m.id) < (
-      SELECT anchor.created_at, anchor.id
-      FROM messages anchor
-      WHERE anchor.id = $2::uuid AND anchor.chat_id = $1::uuid
+    (
+      $2::uuid IS NOT NULL
+      AND (m.created_at, m.id) < (
+        SELECT anchor.created_at, anchor.id
+        FROM messages anchor
+        WHERE anchor.id = $2::uuid AND anchor.chat_id = $1::uuid
+      )
+    )
+    OR (
+      $2::uuid IS NULL
+      AND $4::timestamptz IS NOT NULL
+      AND m.created_at < $4::timestamptz
+    )
+    OR (
+      $2::uuid IS NULL
+      AND $4::timestamptz IS NULL
     )
   )
 ORDER BY m.created_at DESC, m.id DESC
@@ -87,8 +98,12 @@ LIMIT $3`
 	if opts.BeforeID != nil {
 		beforeID = string(*opts.BeforeID)
 	}
+	var beforeTime any
+	if opts.BeforeTime != nil {
+		beforeTime = opts.BeforeTime.UTC()
+	}
 
-	rows, err := r.pool.Query(ctx, q, string(chatID), beforeID, limit)
+	rows, err := r.pool.Query(ctx, q, string(chatID), beforeID, limit, beforeTime)
 	if err != nil {
 		return nil, err
 	}

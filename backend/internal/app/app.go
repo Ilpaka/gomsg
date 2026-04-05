@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"goflow/backend/internal/service"
 	httptransport "goflow/backend/internal/transport/http"
+	wstransport "goflow/backend/internal/transport/ws"
 )
 
 type App struct {
@@ -26,10 +28,33 @@ func New(c *Container) (*App, error) {
 	if c.Users != nil && c.Sessions != nil {
 		authSvc = service.NewAuthService(c.Users, c.Sessions, c.Config)
 	}
+	var userSvc *service.UserService
+	if c.Users != nil {
+		userSvc = service.NewUserService(c.Users)
+	}
+	var chatSvc *service.ChatService
+	if c.Users != nil && c.Chats != nil {
+		chatSvc = service.NewChatService(c.Chats, c.Users)
+	}
+	var msgSvc *service.MessageService
+	if c.Messages != nil && c.Chats != nil {
+		msgSvc = service.NewMessageService(c.Messages, c.Chats)
+	}
+	var wsHTTP http.Handler
+	if msgSvc != nil && c.Chats != nil {
+		hub := wstransport.NewHub()
+		bc := wstransport.NewBroadcaster(hub, c.Chats)
+		wsSvc := service.NewWSService(msgSvc, c.Chats, bc)
+		wsHTTP = wstransport.NewHandler(hub, wsSvc, []byte(strings.TrimSpace(c.Config.JWT.Secret)), c.Logger)
+	}
 	httptransport.Register(mux, &httptransport.Deps{
-		Config: c.Config,
-		Logger: c.Logger,
-		Auth:   authSvc,
+		Config:   c.Config,
+		Logger:   c.Logger,
+		Auth:     authSvc,
+		Users:    userSvc,
+		Chats:    chatSvc,
+		Messages: msgSvc,
+		WS:       wsHTTP,
 	})
 
 	addr := fmt.Sprintf(":%s", c.Config.App.Port)

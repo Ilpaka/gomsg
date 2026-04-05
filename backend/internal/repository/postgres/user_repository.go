@@ -103,7 +103,6 @@ FROM users
 WHERE is_active = true
   AND (
     nickname ILIKE $1
-    OR email ILIKE $1
     OR COALESCE(first_name, '') ILIKE $1
     OR COALESCE(last_name, '') ILIKE $1
   )
