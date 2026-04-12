@@ -10,6 +10,7 @@ import (
 	"goflow/backend/internal/dto"
 	apperr "goflow/backend/internal/pkg/errors"
 	"goflow/backend/internal/repository"
+	redistore "goflow/backend/internal/repository/redis"
 	wstransport "goflow/backend/internal/transport/ws"
 )
 
@@ -17,13 +18,21 @@ var _ wstransport.EventProcessor = (*WSService)(nil)
 
 // WSService wires websocket inbound events to MessageService and chat fan-out.
 type WSService struct {
-	msgs  *MessageService
-	chats repository.ChatRepository
-	bc    *wstransport.Broadcaster
+	msgs     *MessageService
+	chats    repository.ChatRepository
+	typing   *redistore.TypingRepository
+	presence wstransport.PresenceNotifier
+	bc       *wstransport.Broadcaster
 }
 
-func NewWSService(msgs *MessageService, chats repository.ChatRepository, bc *wstransport.Broadcaster) *WSService {
-	return &WSService{msgs: msgs, chats: chats, bc: bc}
+func NewWSService(
+	msgs *MessageService,
+	chats repository.ChatRepository,
+	typing *redistore.TypingRepository,
+	presence wstransport.PresenceNotifier,
+	bc *wstransport.Broadcaster,
+) *WSService {
+	return &WSService{msgs: msgs, chats: chats, typing: typing, presence: presence, bc: bc}
 }
 
 // HandleEvent implements wstransport.EventProcessor.
@@ -41,6 +50,10 @@ func (s *WSService) HandleEvent(ctx context.Context, userID domain.ID, payload [
 		return [][]byte{b}, nil
 	}
 	meta := metaOrEmpty(env.Meta)
+
+	if s.presence != nil {
+		s.presence.Activity(ctx, userID)
+	}
 
 	switch env.Event {
 	case wstransport.EventPing:
@@ -140,6 +153,13 @@ func (s *WSService) handleTyping(ctx context.Context, userID domain.ID, event st
 			return [][]byte{b}, nil
 		}
 		return [][]byte{wsErrorFrame(err, meta)}, nil
+	}
+	if s.typing != nil {
+		if event == wstransport.EventTypingStop {
+			_ = s.typing.StopTyping(ctx, cid, userID)
+		} else {
+			_ = s.typing.StartTyping(ctx, cid, userID)
+		}
 	}
 	outEvent := wstransport.EventTypingStarted
 	if event == wstransport.EventTypingStop {

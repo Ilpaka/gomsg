@@ -34,7 +34,13 @@ func main() {
 	}
 	defer pool.Close()
 
-	container := app.NewContainer(cfg, log, pool)
+	container, err := app.NewContainer(cfg, log, pool)
+	if err != nil {
+		log.Error("failed to create container", "err", err)
+		os.Exit(1)
+	}
+	defer container.Close()
+
 	application, err := app.New(container)
 	if err != nil {
 		log.Error("failed to create application", "err", err)

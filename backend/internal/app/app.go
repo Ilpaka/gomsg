@@ -43,9 +43,26 @@ func New(c *Container) (*App, error) {
 	var wsHTTP http.Handler
 	if msgSvc != nil && c.Chats != nil {
 		hub := wstransport.NewHub()
-		bc := wstransport.NewBroadcaster(hub, c.Chats)
-		wsSvc := service.NewWSService(msgSvc, c.Chats, bc)
-		wsHTTP = wstransport.NewHandler(hub, wsSvc, []byte(strings.TrimSpace(c.Config.JWT.Secret)), c.Logger)
+		bc := wstransport.NewBroadcaster(hub, c.Chats, c.PubSub)
+
+		var presenceSvc *service.PresenceService
+		if c.Presence != nil {
+			presenceSvc = service.NewPresenceService(c.Presence)
+		}
+
+		var presenceHook wstransport.PresenceNotifier
+		if presenceSvc != nil {
+			presenceHook = presenceSvc
+		}
+
+		wsSvc := service.NewWSService(msgSvc, c.Chats, c.Typing, presenceHook, bc)
+		wsHTTP = wstransport.NewHandler(hub, wsSvc, []byte(strings.TrimSpace(c.Config.JWT.Secret)), c.Logger, presenceHook)
+
+		if c.PubSub != nil {
+			go func() {
+				_ = bc.StartRedisRelay(context.Background())
+			}()
+		}
 	}
 	httptransport.Register(mux, &httptransport.Deps{
 		Config:   c.Config,

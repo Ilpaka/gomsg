@@ -23,28 +23,33 @@ type EventProcessor interface {
 
 // Client is one websocket connection for a user.
 type Client struct {
-	hub    *Hub
-	conn   *websocket.Conn
-	send   chan []byte
-	userID domain.ID
-	ctx    context.Context
+	hub          *Hub
+	conn         *websocket.Conn
+	send         chan []byte
+	userID       domain.ID
+	ctx          context.Context
+	onDisconnect func(domain.ID)
 }
 
-func newClient(hub *Hub, conn *websocket.Conn, userID domain.ID, ctx context.Context) *Client {
+func newClient(hub *Hub, conn *websocket.Conn, userID domain.ID, ctx context.Context, onDisconnect func(domain.ID)) *Client {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return &Client{
-		hub:    hub,
-		conn:   conn,
-		send:   make(chan []byte, 256),
-		userID: userID,
-		ctx:    ctx,
+		hub:          hub,
+		conn:         conn,
+		send:         make(chan []byte, 256),
+		userID:       userID,
+		ctx:          ctx,
+		onDisconnect: onDisconnect,
 	}
 }
 
 func (c *Client) readPump(proc EventProcessor) {
 	defer func() {
+		if c.onDisconnect != nil {
+			c.onDisconnect(c.userID)
+		}
 		c.hub.Unregister(c)
 		_ = c.conn.Close()
 	}()

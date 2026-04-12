@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -21,14 +22,15 @@ var upgrader = websocket.Upgrader{
 
 // Handler upgrades HTTP to WebSocket and binds a Client to the Hub.
 type Handler struct {
-	hub    *Hub
-	proc   EventProcessor
-	secret []byte
-	log    *slog.Logger
+	hub      *Hub
+	proc     EventProcessor
+	secret   []byte
+	log      *slog.Logger
+	presence PresenceNotifier
 }
 
-func NewHandler(hub *Hub, proc EventProcessor, jwtSecret []byte, log *slog.Logger) *Handler {
-	return &Handler{hub: hub, proc: proc, secret: jwtSecret, log: log}
+func NewHandler(hub *Hub, proc EventProcessor, jwtSecret []byte, log *slog.Logger, presence PresenceNotifier) *Handler {
+	return &Handler{hub: hub, proc: proc, secret: jwtSecret, log: log, presence: presence}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +61,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := newClient(h.hub, conn, uid, r.Context())
+	if h.presence != nil {
+		h.presence.Connected(r.Context(), uid)
+	}
+
+	onDisconnect := func(id domain.ID) {
+		if h.presence != nil {
+			h.presence.Disconnected(context.Background(), id)
+		}
+	}
+
+	client := newClient(h.hub, conn, uid, r.Context(), onDisconnect)
 	h.hub.Register(client)
 	go client.writePump()
 	client.readPump(h.proc)
