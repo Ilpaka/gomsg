@@ -1,0 +1,114 @@
+{
+  "title": "GoFlow Backend Overview",
+  "uid": "goflow-backend-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP RPS",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total[5m]))", "legendFormat": "rps", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP p95 latency (s)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP errors (4xx+5xx rate)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status_class=~\"4xx|5xx\"}[5m]))",
+          "legendFormat": "errors",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Inflight HTTP",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "id": 4,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "http_requests_inflight", "legendFormat": "inflight", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Active WebSocket connections",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "id": 5,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "ws_active_connections", "legendFormat": "ws", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages created / updated / deleted (rate)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "id": 6,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "sum(rate(messages_created_total[5m]))", "legendFormat": "created", "refId": "A" },
+        { "expr": "sum(rate(messages_updated_total[5m]))", "legendFormat": "updated", "refId": "B" },
+        { "expr": "sum(rate(messages_deleted_total[5m]))", "legendFormat": "deleted", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Auth attempts / failures (rate)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 7,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(auth_register_attempts_total[5m])) + sum(rate(auth_login_attempts_total[5m])) + sum(rate(auth_refresh_attempts_total[5m]))",
+          "legendFormat": "attempts",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(auth_failures_total[5m]))",
+          "legendFormat": "failures",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

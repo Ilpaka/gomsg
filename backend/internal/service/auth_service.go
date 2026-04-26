@@ -128,14 +128,14 @@ func (s *AuthService) Login(ctx context.Context, in dto.LoginRequest, meta Clien
 	}, nil
 }
 
-func (s *AuthService) Refresh(ctx context.Context, refreshPlain string) (*dto.RefreshResponse, error) {
+func (s *AuthService) Refresh(ctx context.Context, refreshPlain string, meta ClientMeta) (*dto.RefreshResponse, error) {
 	refreshPlain = strings.TrimSpace(refreshPlain)
 	if refreshPlain == "" {
 		return nil, apperr.Validation("refresh_token is required", nil)
 	}
 
-	h := hashRefreshToken(refreshPlain)
-	sess, err := s.sessions.GetByTokenHash(ctx, h)
+	oldHash := hashRefreshToken(refreshPlain)
+	sess, err := s.sessions.GetByTokenHash(ctx, oldHash)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apperr.Unauthorized("invalid refresh token")
@@ -148,10 +148,35 @@ func (s *AuthService) Refresh(ctx context.Context, refreshPlain string) (*dto.Re
 		return nil, err
 	}
 
+	newPlain, err := newRefreshPlain()
+	if err != nil {
+		return nil, apperr.Internal("generate refresh token", err)
+	}
+	newHash := hashRefreshToken(newPlain)
+	ttl := time.Duration(s.cfg.JWT.RefreshTTLSeconds) * time.Second
+	if ttl <= 0 {
+		return nil, apperr.Internal("invalid refresh ttl", fmt.Errorf("refresh_ttl_seconds=%d", s.cfg.JWT.RefreshTTLSeconds))
+	}
+	exp := time.Now().UTC().Add(ttl)
+	newSess := &domain.RefreshSession{
+		UserID:    sess.UserID,
+		TokenHash: newHash,
+		UserAgent: strOrNil(meta.UserAgent),
+		IPAddress: strOrNil(trimIP(meta.IP)),
+		ExpiresAt: exp,
+	}
+	if err := s.sessions.RotateRefresh(ctx, oldHash, newSess); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, apperr.Unauthorized("invalid refresh token")
+		}
+		return nil, apperr.Internal("rotate refresh session", err)
+	}
+
 	return &dto.RefreshResponse{
-		AccessToken: access,
-		ExpiresIn:   s.cfg.JWT.AccessTTLSeconds,
-		TokenType:   "Bearer",
+		AccessToken:  access,
+		RefreshToken: newPlain,
+		ExpiresIn:    s.cfg.JWT.AccessTTLSeconds,
+		TokenType:    "Bearer",
 	}, nil
 }
 

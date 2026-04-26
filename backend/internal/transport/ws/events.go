@@ -15,6 +15,8 @@ const (
 	EventMessageCreated = "message.created"
 	EventMessageUpdated = "message.updated"
 	EventMessageDeleted = "message.deleted"
+	// EventMessageReadReceipt is emitted on the wire after a read (Kafka → consumer → hub).
+	EventMessageReadReceipt = "message.read_receipt"
 	EventTypingStarted  = "typing.started"
 	EventTypingStopped  = "typing.stopped"
 	EventError          = "error"

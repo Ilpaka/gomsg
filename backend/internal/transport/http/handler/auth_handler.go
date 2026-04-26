@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"goflow/backend/internal/dto"
+	"goflow/backend/internal/observability/metrics"
 	apperr "goflow/backend/internal/pkg/errors"
 	"goflow/backend/internal/pkg/response"
 	"goflow/backend/internal/service"
@@ -20,20 +21,30 @@ const maxAuthBodyBytes = 1 << 20
 type Auth struct {
 	svc *service.AuthService
 	log *slog.Logger
+	met *metrics.M
 }
 
-func NewAuth(svc *service.AuthService, log *slog.Logger) *Auth {
-	return &Auth{svc: svc, log: log}
+func NewAuth(svc *service.AuthService, log *slog.Logger, met *metrics.M) *Auth {
+	return &Auth{svc: svc, log: log, met: met}
 }
 
 func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
+	if h.met != nil {
+		h.met.AuthRegister.Inc()
+	}
 	var body dto.RegisterRequest
 	if err := decodeJSON(w, r, &body); err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues("validation").Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}
 	out, err := h.svc.Register(r.Context(), body, clientMeta(r))
 	if err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues(metrics.AuthFailureFromErr(err)).Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}
@@ -41,13 +52,22 @@ func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) Login(w http.ResponseWriter, r *http.Request) {
+	if h.met != nil {
+		h.met.AuthLogin.Inc()
+	}
 	var body dto.LoginRequest
 	if err := decodeJSON(w, r, &body); err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues("validation").Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}
 	out, err := h.svc.Login(r.Context(), body, clientMeta(r))
 	if err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues(metrics.AuthFailureFromErr(err)).Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}
@@ -55,13 +75,22 @@ func (h *Auth) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
+	if h.met != nil {
+		h.met.AuthRefresh.Inc()
+	}
 	var body dto.RefreshRequest
 	if err := decodeJSON(w, r, &body); err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues("validation").Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}
-	out, err := h.svc.Refresh(r.Context(), body.RefreshToken)
+	out, err := h.svc.Refresh(r.Context(), body.RefreshToken, clientMeta(r))
 	if err != nil {
+		if h.met != nil {
+			h.met.AuthFailures.WithLabelValues(metrics.AuthFailureFromErr(err)).Inc()
+		}
 		response.WriteError(w, r, h.log, err)
 		return
 	}

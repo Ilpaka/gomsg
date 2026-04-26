@@ -4,16 +4,18 @@ import (
 	"sync"
 
 	"goflow/backend/internal/domain"
+	"goflow/backend/internal/observability/metrics"
 )
 
 // Hub tracks all active websocket clients keyed by user id (multiple connections per user).
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[domain.ID]map[*Client]struct{}
+	met     *metrics.M
 }
 
-func NewHub() *Hub {
-	return &Hub{clients: make(map[domain.ID]map[*Client]struct{})}
+func NewHub(m *metrics.M) *Hub {
+	return &Hub{clients: make(map[domain.ID]map[*Client]struct{}), met: m}
 }
 
 func (h *Hub) Register(c *Client) {
@@ -25,6 +27,9 @@ func (h *Hub) Register(c *Client) {
 		h.clients[c.userID] = set
 	}
 	set[c] = struct{}{}
+	if h.met != nil {
+		h.met.WSActive.Inc()
+	}
 }
 
 func (h *Hub) Unregister(c *Client) {
@@ -37,6 +42,9 @@ func (h *Hub) Unregister(c *Client) {
 	delete(set, c)
 	if len(set) == 0 {
 		delete(h.clients, c.userID)
+	}
+	if h.met != nil {
+		h.met.WSActive.Dec()
 	}
 }
 
@@ -57,6 +65,27 @@ func (h *Hub) SendToUser(userID domain.ID, payload []byte) {
 		case c.send <- cp:
 		default:
 			// drop if client is slow; connection will catch up on next events
+		}
+	}
+}
+
+// CloseAll closes every active websocket connection (used during HTTP server shutdown).
+func (h *Hub) CloseAll() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	var clients []*Client
+	for _, set := range h.clients {
+		for c := range set {
+			clients = append(clients, c)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range clients {
+		if c != nil {
+			_ = c.closeForShutdown()
 		}
 	}
 }

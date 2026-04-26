@@ -97,7 +97,7 @@ func (r *UserRepository) Search(ctx context.Context, query string, page reposito
 	}
 
 	const q = `
-SELECT id::text, email, password_hash, nickname, first_name, last_name, avatar_url,
+SELECT id::text, email, nickname, first_name, last_name, avatar_url,
        created_at, updated_at, last_seen_at, is_active
 FROM users
 WHERE is_active = true
@@ -117,7 +117,7 @@ LIMIT $2 OFFSET $3`
 
 	var out []domain.User
 	for rows.Next() {
-		u, err := scanUser(rows)
+		u, err := scanUserSearchRow(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -176,5 +176,28 @@ func scanUser(row userScanner) (domain.User, error) {
 		return domain.User{}, err
 	}
 	u.ID = domain.ID(id)
+	return u, nil
+}
+
+func scanUserSearchRow(row userScanner) (domain.User, error) {
+	var u domain.User
+	var id string
+	err := row.Scan(
+		&id,
+		&u.Email,
+		&u.Nickname,
+		&u.FirstName,
+		&u.LastName,
+		&u.AvatarURL,
+		&u.CreatedAt,
+		&u.UpdatedAt,
+		&u.LastSeenAt,
+		&u.IsActive,
+	)
+	if err != nil {
+		return domain.User{}, err
+	}
+	u.ID = domain.ID(id)
+	u.PasswordHash = ""
 	return u, nil
 }

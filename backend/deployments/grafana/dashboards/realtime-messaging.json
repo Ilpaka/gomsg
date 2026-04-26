@@ -1,0 +1,133 @@
+{
+  "title": "GoFlow Realtime / Messaging",
+  "uid": "goflow-realtime",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "WS inbound events / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(ws_events_inbound_total[5m])) by (event)",
+          "legendFormat": "{{event}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WS outbound events / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(ws_events_outbound_total[5m])) by (event)",
+          "legendFormat": "{{event}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Read receipts / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "id": 3,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(messages_read_receipts_total[5m]))",
+          "legendFormat": "read_receipts",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WS handler errors / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "id": 4,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(ws_handler_errors_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox relay publish ok / fail",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "id": 5,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(outbox_relay_publish_success_total[5m]))",
+          "legendFormat": "ok",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(outbox_relay_publish_failures_total[5m]))",
+          "legendFormat": "fail",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka consumer handled / fail",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 6,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(kafka_consumer_events_handled_total[5m]))",
+          "legendFormat": "handled",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(kafka_consumer_handler_failures_total[5m]))",
+          "legendFormat": "fail",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox rows created / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 7,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(outbox_events_created_total[5m]))",
+          "legendFormat": "outbox",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

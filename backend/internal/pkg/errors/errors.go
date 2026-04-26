@@ -34,9 +34,11 @@ const (
 )
 
 // Error is a typed application error safe to return through transport layers.
+// Details is optional structured data (e.g. validation fields); JSON encoding is handled by HTTP layer.
 type Error struct {
 	Kind    Kind
 	Message string
+	Details any
 	cause   error
 }
 
@@ -86,6 +88,16 @@ func New(kind Kind, message string, cause error) *Error {
 	return &Error{Kind: kind, Message: message, cause: cause}
 }
 
+// WithDetails returns a shallow copy of err with Details set (for *Error only).
+func WithDetails(err error, details any) error {
+	if ae, ok := As(err); ok {
+		cp := *ae
+		cp.Details = details
+		return &cp
+	}
+	return err
+}
+
 // Unauthorized is a 401-class error (e.g. bad credentials or missing token).
 func Unauthorized(message string) *Error {
 	return New(KindUnauthorized, message, nil)
@@ -104,6 +116,11 @@ func NotFound(message string) *Error {
 // Validation wraps validation failures (optionally with a cause).
 func Validation(message string, cause error) *Error {
 	return New(KindValidationFailed, message, cause)
+}
+
+// ValidationDetails is a validation error with structured details (e.g. field list).
+func ValidationDetails(message string, details any) *Error {
+	return &Error{Kind: KindValidationFailed, Message: message, Details: details}
 }
 
 // Conflict indicates a domain conflict (e.g. duplicate email).

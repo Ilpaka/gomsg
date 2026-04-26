@@ -52,7 +52,8 @@ type LoginResponse struct {
 
 // RefreshResponse is returned after a successful refresh.
 type RefreshResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   int    `json:"expires_in"`
-	TokenType   string `json:"token_type"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	TokenType    string `json:"token_type"`
 }

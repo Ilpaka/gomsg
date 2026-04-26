@@ -1,0 +1,24 @@
+// Grafana Alloy: ship Docker container logs to Loki (no Promtail).
+// Requires Docker socket mount. Adjust relabel rules if you add many services.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+discovery.docker "linux" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.linux.targets
+  forward_to = [loki.write.default.receiver]
+}

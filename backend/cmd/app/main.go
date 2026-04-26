@@ -8,6 +8,7 @@ import (
 
 	"goflow/backend/internal/app"
 	"goflow/backend/internal/config"
+	"goflow/backend/internal/migration"
 	"goflow/backend/internal/pkg/logger"
 	"goflow/backend/internal/repository/postgres"
 )
@@ -19,7 +20,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New()
+	log := logger.New(cfg)
 	log.Info("application starting",
 		"http_port", cfg.App.Port,
 		"redis_addr", cfg.Redis.Addr,
@@ -33,6 +34,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	if cfg.Runtime.RunMigrationsOnStartup {
+		if err := migration.Up(context.Background(), pool); err != nil {
+			log.Error("database migrations", "err", err)
+			os.Exit(1)
+		}
+		log.Info("database migrations applied")
+	}
 
 	container, err := app.NewContainer(cfg, log, pool)
 	if err != nil {

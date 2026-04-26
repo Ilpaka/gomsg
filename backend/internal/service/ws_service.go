@@ -94,14 +94,13 @@ func (s *WSService) handleMessageSend(ctx context.Context, userID domain.ID, dat
 		}, metaOrEmpty(meta))
 		return [][]byte{b}, nil
 	}
-	msg, err := s.msgs.Create(ctx, userID, strings.TrimSpace(in.ChatID), dto.CreateMessageRequest{
+	_, err := s.msgs.Create(ctx, userID, strings.TrimSpace(in.ChatID), dto.CreateMessageRequest{
 		Text:      in.Text,
 		ReplyToID: in.ReplyToID,
 	})
 	if err != nil {
 		return [][]byte{wsErrorFrame(err, meta)}, nil
 	}
-	_ = s.bc.PublishToChat(ctx, domain.ID(msg.ChatID), wstransport.EventMessageCreated, msg, metaOrEmpty(meta))
 	return nil, nil
 }
 
@@ -116,16 +115,10 @@ func (s *WSService) handleMessageRead(ctx context.Context, userID domain.ID, dat
 		}, metaOrEmpty(meta))
 		return [][]byte{b}, nil
 	}
-	out, err := s.msgs.MarkRead(ctx, userID, strings.TrimSpace(in.MessageID))
+	_, err := s.msgs.MarkRead(ctx, userID, strings.TrimSpace(in.MessageID))
 	if err != nil {
 		return [][]byte{wsErrorFrame(err, meta)}, nil
 	}
-	readPayload := map[string]any{
-		"chat_id":              out.ChatID,
-		"user_id":              string(userID),
-		"last_read_message_id": out.LastReadMessageID,
-	}
-	_ = s.bc.PublishToChat(ctx, domain.ID(out.ChatID), wstransport.EventMessageRead, readPayload, metaOrEmpty(meta))
 	return nil, nil
 }
 

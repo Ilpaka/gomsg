@@ -37,6 +37,11 @@ func (b *Broadcaster) PublishToChat(ctx context.Context, chatID domain.ID, event
 	return b.deliverPayload(ctx, chatID, payload)
 }
 
+// DeliverEnvelopeBytes sends a pre-serialized WS envelope JSON to all chat members (local hub only).
+func (b *Broadcaster) DeliverEnvelopeBytes(ctx context.Context, chatID domain.ID, payload []byte) error {
+	return b.deliverPayload(ctx, chatID, payload)
+}
+
 func (b *Broadcaster) deliverPayload(ctx context.Context, chatID domain.ID, payload []byte) error {
 	if b == nil || b.hub == nil || b.chats == nil {
 		return nil

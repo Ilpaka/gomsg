@@ -12,3 +12,30 @@ jwt:
   secret: "local-dev-only-change-in-prod-min-16"
   access_ttl_seconds: 900
   refresh_ttl_seconds: 604800
+
+# Per client IP (see middleware.ClientIP). Env overrides: RATE_LIMIT_*_PER_MINUTE.
+rate_limit:
+  login_per_minute: 60
+  register_per_minute: 20
+  message_send_per_minute: 120
+  ws_connect_per_minute: 30
+
+runtime:
+  run_migrations_on_startup: true
+
+kafka:
+  enabled: false
+  brokers: "localhost:9092"
+  topic: "goflow.domain.events"
+  consumer_group: "goflow-ws-fanout"
+
+observability:
+  service_name: "goflow-backend"
+  env: "development"
+  log_format: "text"
+
+ws:
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+  ticket_ttl_seconds: 120

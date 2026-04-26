@@ -10,6 +10,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"goflow/backend/internal/config"
+	"goflow/backend/internal/observability/metrics"
 	"goflow/backend/internal/repository"
 	"goflow/backend/internal/repository/postgres"
 	redistore "goflow/backend/internal/repository/redis"
@@ -17,34 +18,42 @@ import (
 
 // Container wires application dependencies.
 type Container struct {
-	Config *config.Config
-	Logger *slog.Logger
-	Pool   *pgxpool.Pool
-	Redis  *goredis.Client
+	Config  *config.Config
+	Logger  *slog.Logger
+	Metrics *metrics.M
+	Pool    *pgxpool.Pool
+	Redis   *goredis.Client
 
 	Users    repository.UserRepository
 	Chats    repository.ChatRepository
 	Messages repository.MessageRepository
 	Sessions repository.SessionRepository
 
+	MessagesWriter repository.MessageWriter
+	Outbox         repository.OutboxRepository
+
 	Presence *redistore.PresenceRepository
 	Typing   *redistore.TypingRepository
 	PubSub   *redistore.PubSubRepository
+	WSTicket *redistore.WSTicketStore
 }
 
 // NewContainer returns a container. When pool is non-nil, PostgreSQL repositories are constructed.
 // Redis client is created when cfg.Redis.Addr is set (required by config validation).
 func NewContainer(cfg *config.Config, log *slog.Logger, pool *pgxpool.Pool) (*Container, error) {
 	c := &Container{
-		Config: cfg,
-		Logger: log,
-		Pool:   pool,
+		Config:  cfg,
+		Logger:  log,
+		Metrics: metrics.New(),
+		Pool:    pool,
 	}
 	if pool != nil {
 		c.Users = postgres.NewUserRepository(pool)
 		c.Chats = postgres.NewChatRepository(pool)
 		c.Messages = postgres.NewMessageRepository(pool)
 		c.Sessions = postgres.NewSessionRepository(pool)
+		c.MessagesWriter = postgres.NewMessageWriter(pool, c.Metrics)
+		c.Outbox = postgres.NewOutboxRepository(pool)
 	}
 
 	addr := strings.TrimSpace(cfg.Redis.Addr)
@@ -57,6 +66,7 @@ func NewContainer(cfg *config.Config, log *slog.Logger, pool *pgxpool.Pool) (*Co
 		c.Presence = redistore.NewPresenceRepository(rdb)
 		c.Typing = redistore.NewTypingRepository(rdb)
 		c.PubSub = redistore.NewPubSubRepository(rdb)
+		c.WSTicket = redistore.NewWSTicketStore(rdb)
 	}
 
 	return c, nil

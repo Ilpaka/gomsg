@@ -9,13 +9,6 @@ import (
 	apperr "goflow/backend/internal/pkg/errors"
 )
 
-// ErrorBody is the JSON shape for API errors.
-type ErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Details any    `json:"details,omitempty"`
-}
-
 // SuccessBody is a minimal success envelope; use Data for payloads.
 type SuccessBody struct {
 	OK   bool `json:"ok"`
@@ -30,10 +23,6 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // WriteSuccess writes { "ok": true, "data": data } with HTTP 200 unless status overrides.
-//
-// Example:
-//
-//	response.WriteSuccess(w, http.StatusOK, map[string]any{"user": dto})
 func WriteSuccess(w http.ResponseWriter, status int, data any) {
 	if status == 0 {
 		status = http.StatusOK
@@ -41,14 +30,29 @@ func WriteSuccess(w http.ResponseWriter, status int, data any) {
 	WriteJSON(w, status, SuccessBody{OK: true, Data: data})
 }
 
-// WriteError maps err to JSON and HTTP status. Unknown errors become internal.
+func normalizeDetails(d any) any {
+	if d == nil {
+		return map[string]any{}
+	}
+	return d
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string, details any) {
+	payload := map[string]any{
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+			"details": normalizeDetails(details),
+		},
+	}
+	WriteJSON(w, status, payload)
+}
+
+// WriteError maps err to unified JSON and HTTP status.
 //
-// Example:
+// Format:
 //
-//	if err := svc.Login(...); err != nil {
-//	    response.WriteError(w, r, log, err)
-//	    return
-//	}
+//	{ "error": { "code": "...", "message": "...", "details": {} } }
 func WriteError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) {
 	if err == nil {
 		WriteJSON(w, http.StatusOK, SuccessBody{OK: true})
@@ -56,45 +60,50 @@ func WriteError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 	}
 
 	status := apperr.HTTPStatus(err)
-	body := ErrorBody{Code: "internal", Message: "internal server error"}
+	code := "internal"
+	message := "internal server error"
+	var details any
 
 	if ae, ok := apperr.As(err); ok {
-		body.Code = string(ae.Kind)
-		body.Message = ae.Message
+		code = string(ae.Kind)
+		message = ae.Message
+		details = ae.Details
 	} else {
 		if log != nil {
 			log.Error("unhandled error", "err", err, "path", r.URL.Path)
 		}
 	}
 
-	WriteJSON(w, status, map[string]any{
-		"ok":    false,
-		"error": body,
-	})
+	writeAPIError(w, status, code, message, details)
 }
 
-// WriteErrorWithDetails is like WriteError but attaches optional details (validation fields, etc.).
+// WriteErrorWithDetails is like WriteError but merges explicit details when the error has none.
 func WriteErrorWithDetails(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error, details any) {
 	if err == nil {
 		WriteSuccess(w, http.StatusOK, nil)
 		return
 	}
 	status := apperr.HTTPStatus(err)
-	body := ErrorBody{Code: "internal", Message: "internal server error", Details: details}
+	code := "internal"
+	message := "internal server error"
+	var merged any
 
 	if ae, ok := apperr.As(err); ok {
-		body.Code = string(ae.Kind)
-		body.Message = ae.Message
+		code = string(ae.Kind)
+		message = ae.Message
+		if ae.Details != nil {
+			merged = ae.Details
+		} else {
+			merged = details
+		}
 	} else {
 		if log != nil {
 			log.Error("unhandled error", "err", err, "path", r.URL.Path)
 		}
+		merged = details
 	}
 
-	WriteJSON(w, status, map[string]any{
-		"ok":    false,
-		"error": body,
-	})
+	writeAPIError(w, status, code, message, merged)
 }
 
 // Is reports whether err unwraps to an apperr.Error of the given kind.

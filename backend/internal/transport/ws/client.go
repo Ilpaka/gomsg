@@ -7,6 +7,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"goflow/backend/internal/domain"
+	"goflow/backend/internal/observability/metrics"
 )
 
 const (
@@ -29,9 +30,10 @@ type Client struct {
 	userID       domain.ID
 	ctx          context.Context
 	onDisconnect func(domain.ID)
+	met          *metrics.M
 }
 
-func newClient(hub *Hub, conn *websocket.Conn, userID domain.ID, ctx context.Context, onDisconnect func(domain.ID)) *Client {
+func newClient(hub *Hub, conn *websocket.Conn, userID domain.ID, ctx context.Context, onDisconnect func(domain.ID), met *metrics.M) *Client {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -42,6 +44,7 @@ func newClient(hub *Hub, conn *websocket.Conn, userID domain.ID, ctx context.Con
 		userID:       userID,
 		ctx:          ctx,
 		onDisconnect: onDisconnect,
+		met:          met,
 	}
 }
 
@@ -64,8 +67,15 @@ func (c *Client) readPump(proc EventProcessor) {
 		if err != nil {
 			return
 		}
+		inEv := metrics.EnvelopeEventName(message)
+		if c.met != nil {
+			c.met.WSInbound.WithLabelValues(inEv).Inc()
+		}
 		outs, err := proc.HandleEvent(c.ctx, c.userID, message)
 		if err != nil {
+			if c.met != nil {
+				c.met.WSErrors.WithLabelValues("handler").Inc()
+			}
 			if b, mErr := MarshalEnvelope(EventError, map[string]any{
 				"code":    "internal",
 				"message": err.Error(),
@@ -77,6 +87,9 @@ func (c *Client) readPump(proc EventProcessor) {
 		for _, b := range outs {
 			if b == nil {
 				continue
+			}
+			if c.met != nil {
+				c.met.WSOutbound.WithLabelValues(metrics.EnvelopeEventName(b)).Inc()
 			}
 			select {
 			case c.send <- b:
@@ -115,4 +128,11 @@ func (c *Client) writePump() {
 func (c *Client) writeDirect(b []byte) error {
 	_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return c.conn.WriteMessage(websocket.TextMessage, b)
+}
+
+func (c *Client) closeForShutdown() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
