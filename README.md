@@ -54,7 +54,7 @@ GoFlow/
     │   ├── dto/              ← JSON request/response
     │   ├── repository/       ← интерфейсы; postgres/, redis/
     │   ├── service/          ← бизнес-логика + unit-тесты с моками
-    │   ├── transport/http/   ← router, handlers, middleware
+    │   ├── transport/http/   ← router, handlers, middleware, docs (openapi.yaml + /docs)
     │   ├── transport/ws/     ← hub, client, broadcaster, события
     │   ├── kafka/            ← модель события для брокера
     │   ├── worker/           ← outbox relay, kafka→WS consumer
@@ -68,6 +68,7 @@ GoFlow/
     │   ├── loki/loki-config.yaml
     │   ├── alloy/config.alloy
     │   └── grafana/          ← provisioning + dashboards (JSON)
+    ├── api/                    ← указатель на OpenAPI (см. README в каталоге)
     ├── .env.example
     └── go.mod
 ```
@@ -89,7 +90,21 @@ go run ./cmd/app
 
 Сервис слушает порт из конфига (по умолчанию **8080**).
 
-Контракт WebSocket (envelope, `message.read` vs `message.read_receipt`, ticket flow): [`backend/docs/WS_CONTRACT_V1.md`](backend/docs/WS_CONTRACT_V1.md).
+Контракт WebSocket (envelope, `message.read` vs `message.read_receipt`, ticket flow): [`backend/docs/WS_CONTRACT_V1.md`](backend/docs/WS_CONTRACT_V1.md). Краткая связка HTTP ↔ ticket ↔ connect: [`backend/docs/WS_PROTOCOL.md`](backend/docs/WS_PROTOCOL.md).
+
+## OpenAPI / Swagger (только HTTP API)
+
+- **Источник правды:** файл [`backend/internal/transport/http/docs/openapi.yaml`](backend/internal/transport/http/docs/openapi.yaml) (OpenAPI 3.0). Он вшивается в бинарник через `go:embed`; при правках пересоберите приложение (`go run` / `docker compose build`).
+- **Swagger UI:** после старта приложения откройте в браузере `http://localhost:8080/docs` (порт из `HTTP_PORT` / конфига).
+- **Сырой YAML:** `http://localhost:8080/openapi.yaml` — для импорта в Postman, codegen и т.д.
+- **Авторизация в Swagger UI:** кнопка **Authorize** → в поле `bearerAuth` вставьте значение **`access_token`** из ответа `POST /auth/login` или `POST /auth/register` (без префикса `Bearer ` — Swagger добавит схему сам). Для публичных маршрутов (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/health`, `/docs`, `/openapi.yaml`) авторизация не нужна.
+- **Ошибки API:** единый JSON `{ "error": { "code", "message", "details" } }` описан в компонентах спецификации; отдельно **429** с `code: rate_limited` (middleware). **WebSocket** и бинарные кадры в OpenAPI не дублируются; HTTP-часть ticket/connect задокументирована, детали кадров — в `WS_CONTRACT_V1.md` / `WS_PROTOCOL.md`.
+
+Примеры ручной проверки после авторизации в UI:
+
+1. **GET `/users/me`** — профиль текущего пользователя.
+2. **GET `/chats`** — список чатов.
+3. **POST `/chats/direct`** с телом `{ "user_id": "<uuid другого пользователя>" }` — direct-чат.
 
 ## Docker
 

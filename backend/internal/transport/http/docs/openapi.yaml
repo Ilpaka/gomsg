@@ -1,0 +1,1442 @@
+openapi: 3.0.3
+info:
+  title: GoFlow HTTP API
+  description: |
+    HTTP API мессенджера GoFlow. Спецификация соответствует текущей реализации `internal/transport/http`.
+
+    **Успех:** JSON `{ "ok": true, "data": <payload> }` (см. `internal/pkg/response`).
+
+    **Ошибки (кроме отдельных случаев ниже):** `{ "error": { "code", "message", "details" } }`.
+    Поле `code` для ошибок приложения совпадает с `apperr.Kind`: `unauthorized`, `forbidden`, `not_found`,
+    `validation_failed` (HTTP **422**), `conflict`, `internal`. Для rate limit middleware: HTTP **429**, `code`: `rate_limited`.
+
+    **Авторизация:** для защищённых маршрутов заголовок `Authorization: Bearer <access_jwt>`.
+    `POST /auth/refresh` и `POST /auth/logout` принимают **refresh_token в теле JSON**, без обязательного Bearer.
+
+    **WebSocket:** протокол кадров и события не описаны здесь. HTTP-часть: `POST /ws/ticket` (JSON API) и
+    `GET /ws/connect?ticket=…` (upgrade). При ошибках до upgrade ответ **не** в формате JSON envelope (plain text через `http.Error`).
+    Подробнее: `docs/WS_PROTOCOL.md`, полный контракт: `docs/WS_CONTRACT_V1.md`.
+
+    **Частично / вне OpenAPI:** `GET /metrics` — Prometheus text exposition, не JSON envelope.
+
+    **Условная регистрация маршрутов:** `GET /metrics` подключается только при наличии модуля метрик в DI;
+    `POST /ws/ticket` и `GET /ws/connect` — только при собранном WS-стеке и Redis ticket store (`internal/app/app.go`).
+    Если маршрут не зарегистрирован, клиент получит **404** (стандартный `text/plain` от `net/http`, не JSON envelope).
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Локальный сервер (порт из `HTTP_PORT` / конфига)
+
+tags:
+  - name: Health
+    description: Проверка живости
+  - name: Observability
+    description: Метрики и служебные endpoint-ы
+  - name: Documentation
+    description: OpenAPI spec и Swagger UI
+  - name: Auth
+    description: Регистрация, сессии, JWT
+  - name: Users
+    description: Профиль и поиск пользователей
+  - name: Chats
+    description: Чаты и участники
+  - name: Messages
+    description: Сообщения и read state
+  - name: WebSocket
+    description: HTTP-вспомогательные маршруты для realtime (не JSON-RPC поверх WS)
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: healthLiveness
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Сервис отвечает
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /metrics:
+    get:
+      tags: [Observability]
+      operationId: prometheusMetrics
+      summary: Prometheus metrics scrape
+      description: |
+        Формат Prometheus text exposition. **Не** использует единый JSON envelope `{ ok, data }`.
+      responses:
+        "200":
+          description: Метрики в text/plain
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      tags: [Documentation]
+      operationId: getOpenAPISpec
+      summary: OpenAPI 3 спецификация (YAML)
+      responses:
+        "200":
+          description: YAML
+          content:
+            application/yaml; charset=utf-8:
+              schema:
+                type: string
+                format: binary
+
+  /docs:
+    get:
+      tags: [Documentation]
+      operationId: swaggerUI
+      summary: Swagger UI
+      description: Интерактивная документация; загружает `/openapi.yaml` с того же origin.
+      responses:
+        "200":
+          description: HTML страница Swagger UI
+          content:
+            text/html; charset=utf-8:
+              schema:
+                type: string
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: authRegister
+      summary: Регистрация пользователя
+      description: Rate limit по IP (см. конфиг `rate_limit.register_per_minute`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Создан пользователь и выдана пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessRegister"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "409":
+          $ref: "#/components/responses/ErrorConflict"
+        "429":
+          $ref: "#/components/responses/ErrorRateLimited"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: authLogin
+      summary: Вход по email и паролю
+      description: Rate limit по IP (`rate_limit.login_per_minute`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Пара токенов и публичные поля пользователя
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessLogin"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "429":
+          $ref: "#/components/responses/ErrorRateLimited"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: authRefresh
+      summary: Обновление access-токена (rotation refresh)
+      description: |
+        В теле передаётся `refresh_token`. При успехе выдаётся новая пара; старая refresh-сессия отзывается (rotation).
+        **Bearer не требуется.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Новые access и refresh
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessRefresh"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: authLogout
+      summary: Выход из текущей refresh-сессии
+      description: |
+        Отзыв сессии по `refresh_token` из тела. **Bearer не обязателен** (как в коде `Auth.Logout`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "200":
+          description: Сессия завершена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessLogout"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /auth/logout-all:
+    post:
+      tags: [Auth]
+      operationId: authLogoutAll
+      summary: Завершить все refresh-сессии пользователя
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Все сессии отозваны
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessLogoutAll"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /users/me:
+    get:
+      tags: [Users]
+      operationId: usersMeGet
+      summary: Текущий пользователь (полный безопасный профиль)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Профиль «я»
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessUserSelf"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+    patch:
+      tags: [Users]
+      operationId: usersMePatch
+      summary: Частичное обновление профиля
+      description: |
+        Поля, отсутствующие в JSON, не меняются. Тело — один JSON-объект, неизвестные поля отклоняются (`DisallowUnknownFields`).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchUserRequest"
+      responses:
+        "200":
+          description: Обновлённый профиль
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessUserSelf"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /users/search:
+    get:
+      tags: [Users]
+      operationId: usersSearch
+      summary: Поиск пользователей по строке
+      description: |
+        Query `q` обязателен (не пустой после trim). `limit` по умолчанию **20**, макс. **50**; `offset` по умолчанию **0**;
+        отрицательный offset приводится к 0. Некорректные целые в query игнорируются и подставляется default (как `strconv.Atoi` + fallback в handler).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          example: alice
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          example: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          example: 0
+      responses:
+        "200":
+          description: Список карточек пользователей
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessUserSearch"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /users/{id}:
+    get:
+      tags: [Users]
+      operationId: usersGetById
+      summary: Публичная карточка пользователя по UUID
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserIdPath"
+      responses:
+        "200":
+          description: Публичные поля (без email)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessUserCard"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats:
+    get:
+      tags: [Chats]
+      operationId: chatsList
+      summary: Список чатов текущего пользователя
+      description: |
+        `limit` по умолчанию **30**, макс. **100**; `offset` ≥ 0 (отрицательный → 0). Некорректный `limit` в query → значение по умолчанию из сервиса.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          example: 30
+        - name: offset
+          in: query
+          schema:
+            type: integer
+          example: 0
+      responses:
+        "200":
+          description: Список чатов с превью последнего сообщения и unread_count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatList"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/direct:
+    post:
+      tags: [Chats]
+      operationId: chatsCreateDirect
+      summary: Создать или найти direct-чат с пользователем
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDirectChatRequest"
+      responses:
+        "201":
+          description: Детали чата
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatDetail"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "409":
+          $ref: "#/components/responses/ErrorConflict"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/group:
+    post:
+      tags: [Chats]
+      operationId: chatsCreateGroup
+      summary: Создать групповой чат
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupChatRequest"
+      responses:
+        "201":
+          description: Детали чата
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatDetail"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/{chat_id}:
+    get:
+      tags: [Chats]
+      operationId: chatsGetById
+      summary: Детали чата
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatDetail"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/{chat_id}/members:
+    get:
+      tags: [Chats]
+      operationId: chatsMembersList
+      summary: Список участников чата
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatMembers"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+    post:
+      tags: [Chats]
+      operationId: chatsMembersAdd
+      summary: Добавить участников в групповой чат
+      description: "Только для чатов с type=group; требуются права owner/admin (см. сервис)."
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddChatMembersRequest"
+      responses:
+        "200":
+          description: Актуальный список участников после добавления
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessChatMembers"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/{chat_id}/members/{user_id}:
+    delete:
+      tags: [Chats]
+      operationId: chatsMemberRemove
+      summary: Удалить участника или выйти из чата
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        "200":
+          description: Участник удалён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessRemoved"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /chats/{chat_id}/messages:
+    get:
+      tags: [Messages]
+      operationId: messagesListByChat
+      summary: История сообщений чата (новые первые)
+      description: |
+        `limit` по умолчанию **50**, макс. **200**. `before` — опциональный курсор: UUID сообщения или timestamp **RFC3339 / RFC3339Nano**
+        для пагинации «старее чем …». Некорректный `before` → 422.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          example: 50
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+          description: ID сообщения (UUID) или RFC3339/RFC3339Nano
+          example: "2026-04-15T12:00:00Z"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessageList"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+    post:
+      tags: [Messages]
+      operationId: messagesCreateInChat
+      summary: Отправить сообщение в чат
+      description: Rate limit по IP (`rate_limit.message_send_per_minute`). MVP — преимущественно текст.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessageRequest"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "429":
+          $ref: "#/components/responses/ErrorRateLimited"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /messages/{message_id}:
+    get:
+      tags: [Messages]
+      operationId: messagesGetById
+      summary: Получить сообщение по id
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MessageIdPath"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+    patch:
+      tags: [Messages]
+      operationId: messagesPatch
+      summary: Редактировать текст сообщения (автор)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MessageIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchMessageRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+    delete:
+      tags: [Messages]
+      operationId: messagesDelete
+      summary: Удалить сообщение (автор)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MessageIdPath"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeleted"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /messages/{message_id}/read:
+    post:
+      tags: [Messages]
+      operationId: messagesMarkRead
+      summary: Отметить прочтение по сообщению
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MessageIdPath"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMarkRead"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "403":
+          $ref: "#/components/responses/ErrorForbidden"
+        "404":
+          $ref: "#/components/responses/ErrorNotFound"
+        "422":
+          $ref: "#/components/responses/ErrorValidation"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /ws/ticket:
+    post:
+      tags: [WebSocket]
+      operationId: wsIssueTicket
+      summary: Выдать одноразовый ticket для WebSocket
+      description: |
+        Требуется Bearer access JWT. Общий с `GET /ws/connect` лимит по IP на стороне приложения (`rate_limit` для ws connect).
+        Ответ в стандартном envelope; поля в `data`: opaque `ticket` (строка) и `expires_in` (секунды, int).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessWSTicket"
+        "401":
+          $ref: "#/components/responses/ErrorUnauthorized"
+        "429":
+          $ref: "#/components/responses/ErrorRateLimited"
+        "500":
+          $ref: "#/components/responses/ErrorInternal"
+
+  /ws/connect:
+    get:
+      tags: [WebSocket]
+      operationId: wsConnect
+      summary: Upgrade до WebSocket (не JSON API)
+      description: |
+        Query-параметр **`ticket`** (одноразовый, из `POST /ws/ticket`) обязателен. Успешный ответ — **101 Switching Protocols** (не тело JSON).
+
+        При ошибке до upgrade сервер отвечает **401** plain text (`missing ticket`, `invalid or expired ticket`) через `http.Error`, **без** envelope `{ error: … }`.
+
+        Rate limit по IP на этот маршрут включён в приложении.
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema:
+            type: string
+          example: opaque-one-time-value
+      responses:
+        "101":
+          description: WebSocket handshake успешен
+        "401":
+          description: Plain text error body (не JSON API)
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+              examples:
+                missing:
+                  value: "missing ticket\n"
+                invalid:
+                  value: "invalid or expired ticket\n"
+        "429":
+          description: JSON envelope с `rate_limited` (как у остальных лимитов), если сработал limiter до handler
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access JWT из `tokens.access_token` / `access_token` после login или refresh.
+
+  parameters:
+    ChatIdPath:
+      name: chat_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+    MessageIdPath:
+      name: message_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+    UserIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 6ba7b812-9dad-11d1-80b4-00c04fd430c8
+
+  responses:
+    ErrorUnauthorized:
+      description: Не авторизован или невалидный JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: unauthorized
+              message: missing bearer token
+              details: {}
+    ErrorForbidden:
+      description: Доступ запрещён
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ErrorNotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ErrorValidation:
+      description: Ошибка валидации (HTTP 422)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ErrorConflict:
+      description: Конфликт состояния
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ErrorInternal:
+      description: Внутренняя ошибка
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ErrorRateLimited:
+      description: Слишком много запросов (middleware)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: rate_limited
+              message: too many requests
+              details:
+                limiter: login
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+              description: |
+                `unauthorized` | `forbidden` | `not_found` | `validation_failed` | `conflict` | `internal` | для лимита `rate_limited`.
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              description: Произвольная структура; может быть пустым объектом.
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, nickname, password]
+      properties:
+        email:
+          type: string
+          format: email
+        nickname:
+          type: string
+        password:
+          type: string
+          format: password
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    LogoutRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    UserPublic:
+      type: object
+      required: [id, email, nickname]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        nickname:
+          type: string
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in, token_type]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          description: TTL access в секундах
+        token_type:
+          type: string
+          example: Bearer
+
+    UserSelf:
+      type: object
+      required: [id, email, nickname, is_active, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        nickname:
+          type: string
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserCard:
+      type: object
+      required: [id, nickname, is_active]
+      properties:
+        id:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+
+    PatchUserRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        nickname:
+          type: string
+          nullable: true
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+
+    CreateDirectChatRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+
+    CreateGroupChatRequest:
+      type: object
+      additionalProperties: false
+      required: [title, member_ids]
+      properties:
+        title:
+          type: string
+        avatar_url:
+          type: string
+          nullable: true
+        member_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    AddChatMembersRequest:
+      type: object
+      additionalProperties: false
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    LastMessagePreview:
+      type: object
+      required: [id, sender_id, type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sender_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        text:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ChatSummary:
+      type: object
+      required: [id, type, created_at, updated_at, unread_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        title:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_message:
+          $ref: "#/components/schemas/LastMessagePreview"
+        unread_count:
+          type: integer
+          format: int64
+
+    ChatDetail:
+      type: object
+      required: [id, type, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        title:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChatMember:
+      type: object
+      required: [user_id, role, joined_at]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+        joined_at:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      required: [id, chat_id, sender_id, type, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        chat_id:
+          type: string
+          format: uuid
+        sender_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        text:
+          type: string
+          nullable: true
+        reply_to_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+        reply_to_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    PatchMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+
+    MarkReadResponse:
+      type: object
+      required: [chat_id, last_read_message_id]
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        last_read_message_id:
+          type: string
+          format: uuid
+
+    SuccessEnvelope:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        data:
+          description: Полезная нагрузка; для части handler-ов всегда присутствует.
+
+    SuccessRegister:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [user, tokens]
+              properties:
+                user:
+                  $ref: "#/components/schemas/UserPublic"
+                tokens:
+                  $ref: "#/components/schemas/TokenPair"
+
+    SuccessLogin:
+      $ref: "#/components/schemas/SuccessRegister"
+
+    SuccessRefresh:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/TokenPair"
+
+    SuccessLogout:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [logged_out]
+              properties:
+                logged_out:
+                  type: boolean
+                  enum: [true]
+
+    SuccessLogoutAll:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [logged_out_all]
+              properties:
+                logged_out_all:
+                  type: boolean
+                  enum: [true]
+
+    SuccessUserSelf:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/UserSelf"
+
+    SuccessUserCard:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/UserCard"
+
+    SuccessUserSearch:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [users]
+              properties:
+                users:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/UserCard"
+
+    SuccessChatList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [chats]
+              properties:
+                chats:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ChatSummary"
+
+    SuccessChatDetail:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ChatDetail"
+
+    SuccessChatMembers:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [members]
+              properties:
+                members:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ChatMember"
+
+    SuccessMessageList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [messages, has_more]
+              properties:
+                messages:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Message"
+                has_more:
+                  type: boolean
+
+    SuccessMessage:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Message"
+
+    SuccessMarkRead:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/MarkReadResponse"
+
+    SuccessRemoved:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [removed]
+              properties:
+                removed:
+                  type: boolean
+                  enum: [true]
+
+    SuccessDeleted:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [deleted]
+              properties:
+                deleted:
+                  type: boolean
+                  enum: [true]
+
+    SuccessWSTicket:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [ticket, expires_in]
+              properties:
+                ticket:
+                  type: string
+                  description: Opaque одноразовый ticket для query `GET /ws/connect`
+                expires_in:
+                  type: integer
+                  description: TTL ticket в секундах

@@ -8,6 +8,7 @@ import (
 	"goflow/backend/internal/config"
 	"goflow/backend/internal/observability/metrics"
 	"goflow/backend/internal/service"
+	"goflow/backend/internal/transport/http/docs"
 	"goflow/backend/internal/transport/http/handler"
 	"goflow/backend/internal/transport/http/middleware"
 )
@@ -46,6 +47,8 @@ type Deps struct {
 
 // Register wires HTTP routes. Handlers stay thin; domain logic lives in services.
 func Register(mux *http.ServeMux, deps *Deps) {
+	docs.Register(mux)
+
 	mux.Handle("GET /health", healthHandler(deps))
 
 	if deps.Metrics != nil {
