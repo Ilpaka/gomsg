@@ -1,10 +1,43 @@
-# GoFlow — backend мессенджера (Go)
+# gomsg
 
-HTTP API + WebSocket для чатов (direct / group), сообщений, сессий и realtime-событий. Слой данных: **PostgreSQL** (включая transactional **outbox**) + **Redis** (presence, typing, WS tickets, rate limit, pub/sub при необходимости) + опционально **Kafka** для доставки доменных событий между инстансами.
+**Production-grade real-time messaging backend in Go** — HTTP API + WebSocket, PostgreSQL with transactional outbox, Kafka fan-out across replicas, and a full Prometheus/Grafana/Loki observability stack.
 
-## Архитектура
+[![CI](https://github.com/Ilpaka/gomsg/actions/workflows/ci.yml/badge.svg)](https://github.com/Ilpaka/gomsg/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)](https://go.dev/)
+[![Code Style](https://img.shields.io/badge/lint-golangci--lint-blue)](https://golangci-lint.run/)
+[![Docker](https://img.shields.io/badge/run-docker--compose-2496ED?logo=docker)](backend/deployments/docker-compose.yml)
 
-Поток запроса: **transport** (HTTP/WS) → **service** (бизнес-правила) → **repository** (Postgres / Redis). Конфигурация и DI собираются в `internal/app`.
+> 🇷🇺 Русская версия — [README.ru.md](README.ru.md)
+
+---
+
+## Overview
+
+`gomsg` is a backend service for a chat application: direct and group chats, message CRUD with read receipts, user profiles, JWT auth with refresh-token rotation, and WebSocket-driven real-time updates. It is designed to run as **multiple replicas behind a load balancer** — events published by one replica reach WebSocket clients connected to any other replica via a transactional outbox + Kafka fan-out.
+
+Why it is interesting technically:
+
+- **Event delivery survives crashes.** Messages and their domain events are inserted in the same SQL transaction (outbox pattern). A background relay publishes pending rows to Kafka and only then marks them as delivered. Nothing is lost between "row written" and "WebSocket emitted".
+- **Multi-replica WebSocket fan-out.** Each app instance uses its own Kafka consumer group (suffixed with a UUID) so every replica receives every event and broadcasts it to its local WebSocket hub.
+- **Defence-in-depth on the WS handshake.** Clients exchange their JWT for a one-time, short-lived ticket in Redis (`SETNX` + `GETDEL`), so the access token never ends up in a URL or browser history.
+- **Production-ready observability.** 18 Prometheus collectors (HTTP latency/inflight/status class, WS connections and events, auth attempts, message lifecycle, outbox relay, Kafka consumer), three provisioned Grafana dashboards, Loki + Grafana Alloy for log aggregation.
+- **Clean error model.** Typed `apperr` errors map to HTTP status codes and a unified `{ "error": { "code", "message", "details" } }` envelope. Validation surfaces structured field violations.
+
+## Key Features
+
+- **Authentication** — JWT (HS256) access + DB-stored refresh sessions with rotation on every refresh, bcrypt password hashing, `logout` and `logout-all`.
+- **Chats** — direct chats (de-duplicated by ordered user pair), group chats, member roles, last-message preview, read state.
+- **Messages** — send/edit/delete by author, replies within a chat, read receipts, soft delete; types `text` and `system` (image/file rejected by validation until attachments land).
+- **WebSocket** — one-time Redis-backed tickets for upgrade, hub-based broadcast, per-event metrics, graceful close on shutdown.
+- **Transactional outbox + Kafka** — `outbox_events` table written inside the same tx, relay worker, Kafka topic keyed by `chat_id` for in-chat ordering, optional (Kafka can be disabled — relay then publishes directly to the local broadcaster).
+- **Rate limiting** — `golang.org/x/time/rate` token-bucket per IP, per route (`/auth/register`, `/auth/login`, `/chats/{id}/messages`, `/ws/connect`), responses use the same JSON envelope with `code: rate_limited`.
+- **Observability** — Prometheus metrics at `/metrics`, structured `log/slog` logs with `X-Request-ID` propagation, Grafana dashboards provisioned out-of-the-box, Loki via Grafana Alloy.
+- **Graceful shutdown** — `SIGINT`/`SIGTERM` stops background workers (outbox relay, Kafka consumer), cancels Redis pub/sub, closes WebSocket hub, then `http.Server.Shutdown` with a 15s timeout.
+- **OpenAPI 3 spec** — hand-maintained, embedded via `go:embed`, served as Swagger UI at `/docs` and raw YAML at `/openapi.yaml`.
+
+## Architecture
+
+Request flow: **transport** (HTTP / WS) → **service** (business rules, validation) → **repository** (PostgreSQL / Redis). Wiring lives in `internal/app/container.go`.
 
 ```mermaid
 flowchart LR
@@ -12,197 +45,207 @@ flowchart LR
     HTTP[HTTP router + middleware]
     WS[WebSocket handler]
   end
-  subgraph app
-    App[App.Run / shutdown]
-    C[Container]
-  end
   subgraph services
     Auth[AuthService]
     User[UserService]
     Chat[ChatService]
     Msg[MessageService]
     WSvc[WSService]
-    Pres[PresenceService]
+    Ticket[WSTicketService]
   end
   subgraph data
     PG[(PostgreSQL)]
     RD[(Redis)]
+    KF[(Kafka)]
   end
-  HTTP --> Auth & User & Chat & Msg
+  subgraph workers
+    Outbox[OutboxRelay]
+    Consumer[KafkaWSConsumer]
+  end
+  HTTP --> Auth & User & Chat & Msg & Ticket
   WS --> WSvc
-  WSvc --> Msg & Chat
   Auth & User & Chat & Msg --> PG
+  Ticket --> RD
   WSvc --> RD
-  Pres --> RD
+  Msg --> Outbox
+  Outbox --> KF
+  KF --> Consumer
+  Consumer --> WSvc
 ```
 
-- **Graceful shutdown**: по `SIGINT`/`SIGTERM` останавливаются фоновые воркеры (outbox relay, Kafka consumer при включении), отменяется Redis relay (`PSUBSCRIBE`), закрываются активные WebSocket (`Hub`), затем `http.Server.Shutdown` с таймаутом 15s.
-- **Rate limiting**: token bucket (`golang.org/x/time/rate`) **по IP** (хост из `RemoteAddr`) для `POST /auth/login`, `POST /auth/register`, `POST /chats/{id}/messages`, `GET /ws/connect`. Лимиты задаются в `configs/*.yaml` и через env (см. ниже). Ответ **429** в том же JSON-формате ошибок, код `rate_limited`.
+For an end-to-end walk-through (REST send → outbox → Kafka → WS broadcast) see [`docs/01_PROJECT_OVERVIEW.md`](docs/01_PROJECT_OVERVIEW.md).
 
-## Структура репозитория
+## Tech Stack
+
+| Layer            | Technology                                                   |
+| ---------------- | ------------------------------------------------------------ |
+| Language         | Go 1.25                                                      |
+| HTTP             | `net/http` + `http.ServeMux` (Go 1.22 routing)               |
+| WebSocket        | `gorilla/websocket`                                          |
+| Database         | PostgreSQL 16, `jackc/pgx/v5` (connection pool)              |
+| Cache / Pub-sub  | Redis 7, `redis/go-redis/v9`                                 |
+| Message bus      | Kafka 7.6.1, `segmentio/kafka-go` (optional)                 |
+| Auth             | `golang-jwt/jwt/v5` (HS256), bcrypt via `golang.org/x/crypto` |
+| Logging          | `log/slog` (JSON / text)                                     |
+| Metrics          | `prometheus/client_golang`                                   |
+| Rate limiting    | `golang.org/x/time/rate`                                     |
+| Config           | YAML + env overrides (`gopkg.in/yaml.v3`)                    |
+| Testing          | `testing` + `t.Parallel()`, hand-rolled mocks, `miniredis/v2` |
+| Linting          | `golangci-lint` (errcheck, govet, staticcheck, revive, …)    |
+| CI               | GitHub Actions (lint, test with race, build, Docker)         |
+| Containers       | Multi-stage Dockerfile (Alpine, non-root, `-trimpath -ldflags="-s -w"`) |
+| Observability    | Prometheus, Grafana (provisioned dashboards), Loki, Grafana Alloy |
+
+## Quick Start
+
+Prerequisites: Docker + Docker Compose. Go 1.25 only required if you want to run outside Docker.
+
+```bash
+git clone https://github.com/Ilpaka/gomsg.git
+cd gomsg
+make docker-up
+```
+
+Once the stack is healthy:
+
+| Service       | URL                                  |
+| ------------- | ------------------------------------ |
+| API           | http://localhost:8080                |
+| Swagger UI    | http://localhost:8080/docs           |
+| OpenAPI YAML  | http://localhost:8080/openapi.yaml   |
+| Prometheus    | http://localhost:9090                |
+| Grafana       | http://localhost:3001 (`admin`/`admin`) |
+| Loki API      | http://localhost:3100                |
+
+To run the app without Docker (Postgres and Redis must already be reachable):
+
+```bash
+make run   # CONFIG_PATH=backend/configs/local.yaml go run ./cmd/app
+```
+
+Tear everything down:
+
+```bash
+make docker-down
+```
+
+## Project Structure
 
 ```
-GoFlow/
-├── README.md                 ← этот файл
+gomsg/
+├── README.md / README.ru.md
+├── Makefile
+├── .golangci.yml
+├── .github/workflows/ci.yml
+├── docs/                          # extended documentation (5 docs + index)
 └── backend/
-    ├── cmd/app/main.go       ← точка входа: конфиг, pool, container, signal context
-    ├── configs/local.yaml    ← пример конфигурации (порт, DSN, Redis, JWT, rate_limit)
-    ├── internal/
-    │   ├── app/              ← Container + сборка HTTP/WS + Run (shutdown)
-    │   ├── config/           ← YAML + env overrides + валидация
-    │   ├── domain/           ← сущности без транспорта/SQL
-    │   ├── dto/              ← JSON request/response
-    │   ├── repository/       ← интерфейсы; postgres/, redis/
-    │   ├── service/          ← бизнес-логика + unit-тесты с моками
-    │   ├── transport/http/   ← router, handlers, middleware, docs (openapi.yaml + /docs)
-    │   ├── transport/ws/     ← hub, client, broadcaster, события
-    │   ├── kafka/            ← модель события для брокера
-    │   ├── worker/           ← outbox relay, kafka→WS consumer
-    │   ├── migration/        ← *.sql + runner (schema_migrations)
-    │   ├── observability/metrics ← Prometheus (HTTP, WS, auth, messages, Kafka/outbox)
-    │   └── pkg/              ← jwt, password, errors, response, logger, validator
-    ├── deployments/
-    │   ├── Dockerfile        ← context: каталог backend/
-    │   ├── docker-compose.yml
-    │   ├── prometheus/prometheus.yml
-    │   ├── loki/loki-config.yaml
-    │   ├── alloy/config.alloy
-    │   └── grafana/          ← provisioning + dashboards (JSON)
-    ├── api/                    ← указатель на OpenAPI (см. README в каталоге)
+    ├── cmd/app/main.go            # entrypoint: config → pool → migrations → container → app
+    ├── configs/local.yaml         # default config (port, DSN, Redis, JWT, rate limits, Kafka, observability)
     ├── .env.example
-    └── go.mod
+    ├── internal/
+    │   ├── app/                   # Container + HTTP/WS wiring + Run/Shutdown
+    │   ├── config/                # YAML + env overrides + validation
+    │   ├── domain/                # entities (User, Chat, Message, Session, OutboxEvent, …)
+    │   ├── dto/                   # request/response shapes
+    │   ├── repository/            # interfaces; postgres/, redis/ implementations
+    │   ├── service/               # business logic + unit tests with mocks
+    │   ├── transport/http/        # router, handlers, middleware, embedded openapi.yaml
+    │   ├── transport/ws/          # hub, client, broadcaster, events
+    │   ├── kafka/                 # DomainEvent + producer
+    │   ├── worker/                # OutboxRelay, KafkaWSConsumer
+    │   ├── migration/             # *.sql + runner (schema_migrations table)
+    │   ├── observability/metrics/ # Prometheus collectors and middleware
+    │   └── pkg/                   # jwt, password, errors (apperr), response, logger, validator
+    └── deployments/
+        ├── Dockerfile             # multi-stage, non-root, ~15 MB image
+        ├── docker-compose.yml     # app + postgres + redis + kafka + prometheus + grafana + loki + alloy
+        ├── prometheus/, loki/, alloy/, grafana/  # provisioned configs and dashboards
 ```
 
-**Связка контейнера** (`internal/app/container.go`): при непустом `POSTGRES_DSN` создаются Postgres-репозитории; при непустом `REDIS_ADDR` — клиент Redis, ping, репозитории presence / typing / pubsub. `main` передаёт в `NewContainer` пул из `postgres.NewPool`; при ошибке контейнера приложение не стартует.
+## HTTP API
 
-## Как запустить локально
+The full contract lives in [`backend/internal/transport/http/docs/openapi.yaml`](backend/internal/transport/http/docs/openapi.yaml) (1,400+ lines) and is served as Swagger UI at `http://localhost:8080/docs`. Selected endpoints:
 
-1. Поднять Postgres и Redis (и при полном стеке — Kafka, см. `docker compose`).
-2. Миграции: при `runtime.run_migrations_on_startup: true` в YAML или `RUN_MIGRATIONS_ON_STARTUP=true` они выполняются при старте процесса (`migration.Up`). Иначе примените SQL из `backend/internal/migration/` вручную к базе.
-3. Скопировать `backend/.env.example` в `.env` при необходимости и выставить переменные **или** править `backend/configs/local.yaml`.
-4. Из каталога `backend/`:
+| Method      | Path                                        | Auth   | Notes                                                        |
+| ----------- | ------------------------------------------- | ------ | ------------------------------------------------------------ |
+| `POST`      | `/auth/register`                            | —      | Email + nickname + password (validated server-side)          |
+| `POST`      | `/auth/login`                               | —      | Returns `access_token` + `refresh_token`                     |
+| `POST`      | `/auth/refresh`                             | —      | Refresh with rotation: the old refresh is revoked            |
+| `POST`      | `/auth/logout-all`                          | Bearer | Terminate all active sessions for the current user           |
+| `GET/PATCH` | `/users/me`                                 | Bearer | Profile read / partial update                                |
+| `POST`      | `/chats/direct`                             | Bearer | Idempotent by ordered user pair                              |
+| `POST`      | `/chats/group`                              | Bearer | Group chat with members                                      |
+| `GET/POST`  | `/chats/{id}/messages`                      | Bearer | History / send                                               |
+| `POST`      | `/messages/{id}/read`                       | Bearer | Read receipt                                                 |
+| `POST`      | `/ws/ticket`                                | Bearer | Issue one-time ticket for WS upgrade                         |
+| `GET`       | `/ws/connect?ticket=…`                      | ticket | WebSocket upgrade — ticket consumed atomically               |
+| `GET`       | `/metrics`                                  | —      | Prometheus text exposition                                   |
+| `GET`       | `/health`                                   | —      | Liveness probe                                               |
+
+All responses use a unified envelope:
+
+```json
+// success
+{ "ok": true, "data": { /* ... */ } }
+
+// error
+{ "error": { "code": "validation_failed", "message": "...", "details": { /* optional */ } } }
+```
+
+Error codes: `unauthorized`, `forbidden`, `not_found`, `validation_failed`, `conflict`, `internal`, `rate_limited`.
+
+## WebSocket Protocol
+
+1. `POST /auth/login` → `access_token`.
+2. `POST /ws/ticket` with `Authorization: Bearer <access>` → opaque `ticket` + `expires_in` (default 120 s).
+3. `GET /ws/connect?ticket=<ticket>` — the access token is **never** sent over the WebSocket URL. The ticket is consumed atomically (`GETDEL`) and the connection registers with the `Hub`.
+4. Outbound frames use the envelope `{ "event", "data", "meta" }`. Event names: `message.created`, `message.updated`, `message.deleted`, `message.read_receipt`, `typing.started`, `typing.stopped`, `presence.online`, `presence.offline`.
+5. Inbound command for read receipts is `message.read` (note the asymmetry with the outbound `message.read_receipt`).
+
+Full frame contract: [`backend/docs/WS_CONTRACT_V1.md`](backend/docs/WS_CONTRACT_V1.md). Handshake reference: [`backend/docs/WS_PROTOCOL.md`](backend/docs/WS_PROTOCOL.md).
+
+## Observability
+
+After `make docker-up`:
+
+- **Metrics** — `curl http://localhost:8080/metrics` shows HTTP latency / inflight / status class, WS active connections and in/out event counters, auth attempts and failures, message lifecycle counters, outbox relay iterations / publish success / publish failures, Kafka consumer success / failures.
+- **Dashboards** — Grafana is provisioned with three dashboards in the **gomsg** folder: *Backend Overview*, *Realtime / Messaging*, *Logs Overview*. No manual import required.
+- **Logs** — JSON via stdout (`LOG_FORMAT=json` in compose), aggregated by Grafana Alloy → Loki. Each request line carries `request_id`, `method`, `path`, `status`, `duration_ms`.
+
+Deep dive: [`docs/04_OBSERVABILITY_STACK.md`](docs/04_OBSERVABILITY_STACK.md).
+
+## Development
 
 ```bash
-export CONFIG_PATH="${CONFIG_PATH:-configs/local.yaml}"
-# при необходимости: POSTGRES_DSN, REDIS_ADDR, JWT_SECRET, HTTP_PORT, KAFKA_*, RUN_MIGRATIONS_ON_STARTUP
-go run ./cmd/app
+make help          # list all targets
+make test          # go test ./...
+make test-race     # with the race detector
+make lint          # golangci-lint
+make fmt           # gofmt -s -w
+make build         # ./bin/app
 ```
 
-Сервис слушает порт из конфига (по умолчанию **8080**).
+Migrations are applied automatically on startup when `RUN_MIGRATIONS_ON_STARTUP=true` (default in compose). SQL files live in `backend/internal/migration/` and are tracked in the `schema_migrations` table.
 
-Контракт WebSocket (envelope, `message.read` vs `message.read_receipt`, ticket flow): [`backend/docs/WS_CONTRACT_V1.md`](backend/docs/WS_CONTRACT_V1.md). Краткая связка HTTP ↔ ticket ↔ connect: [`backend/docs/WS_PROTOCOL.md`](backend/docs/WS_PROTOCOL.md).
+CI runs lint, race tests, build, and a Docker image build on every push and pull request: [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-## OpenAPI / Swagger (только HTTP API)
+## Documentation
 
-- **Источник правды:** файл [`backend/internal/transport/http/docs/openapi.yaml`](backend/internal/transport/http/docs/openapi.yaml) (OpenAPI 3.0). Он вшивается в бинарник через `go:embed`; при правках пересоберите приложение (`go run` / `docker compose build`).
-- **Swagger UI:** после старта приложения откройте в браузере `http://localhost:8080/docs` (порт из `HTTP_PORT` / конфига).
-- **Сырой YAML:** `http://localhost:8080/openapi.yaml` — для импорта в Postman, codegen и т.д.
-- **Авторизация в Swagger UI:** кнопка **Authorize** → в поле `bearerAuth` вставьте значение **`access_token`** из ответа `POST /auth/login` или `POST /auth/register` (без префикса `Bearer ` — Swagger добавит схему сам). Для публичных маршрутов (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/health`, `/docs`, `/openapi.yaml`) авторизация не нужна.
-- **Ошибки API:** единый JSON `{ "error": { "code", "message", "details" } }` описан в компонентах спецификации; отдельно **429** с `code: rate_limited` (middleware). **WebSocket** и бинарные кадры в OpenAPI не дублируются; HTTP-часть ticket/connect задокументирована, детали кадров — в `WS_CONTRACT_V1.md` / `WS_PROTOCOL.md`.
+| Document                                                    | What's inside                                                 |
+| ----------------------------------------------------------- | ------------------------------------------------------------- |
+| [`docs/00_DOCS_INDEX.md`](docs/00_DOCS_INDEX.md)            | Navigation hub                                                |
+| [`docs/01_PROJECT_OVERVIEW.md`](docs/01_PROJECT_OVERVIEW.md) | Modules, data flows, MVP status                               |
+| [`docs/02_REDIS_USAGE.md`](docs/02_REDIS_USAGE.md)          | Presence, typing, tickets, pub-sub — what Redis is **not** used for |
+| [`docs/03_KAFKA_USAGE.md`](docs/03_KAFKA_USAGE.md)          | Outbox relay, fan-out via per-replica consumer groups         |
+| [`docs/04_OBSERVABILITY_STACK.md`](docs/04_OBSERVABILITY_STACK.md) | Prometheus, Grafana, Loki, Alloy setup; LogQL examples  |
+| [`docs/05_DATABASE_STRUCTURES.md`](docs/05_DATABASE_STRUCTURES.md) | Schema, indices, relationships                          |
+| [`backend/docs/WS_CONTRACT_V1.md`](backend/docs/WS_CONTRACT_V1.md) | WebSocket frame contract                                |
+| [`backend/docs/WS_PROTOCOL.md`](backend/docs/WS_PROTOCOL.md) | Handshake reference                                          |
 
-Примеры ручной проверки после авторизации в UI:
+## Roadmap
 
-1. **GET `/users/me`** — профиль текущего пользователя.
-2. **GET `/chats`** — список чатов.
-3. **POST `/chats/direct`** с телом `{ "user_id": "<uuid другого пользователя>" }` — direct-чат.
-
-## Docker
-
-Из каталога `backend/deployments/`:
-
-```bash
-docker compose up --build
-```
-
-Образ собирается с **контекстом** `backend/` (см. `dockerfile: deployments/Dockerfile` в compose). В контейнер кладётся `configs/local.yaml`; DSN, Redis и Kafka переопределяются env из compose (`postgres`, `redis`, `kafka` как hostname). По умолчанию в compose включены **`KAFKA_ENABLED=true`**, **`RUN_MIGRATIONS_ON_STARTUP=true`** и allowlist для WS (`WS_ALLOWED_ORIGINS`).
-
-### Observability (Prometheus, Grafana, Loki, Grafana Alloy)
-
-Из `backend/deployments/` поднимается расширенный стек: **app**, **postgres**, **redis**, **kafka**, **prometheus**, **grafana**, **loki**, **alloy**. Логи контейнеров собирает **Grafana Alloy** (Docker socket → Loki), без Promtail.
-
-| URL | Назначение |
-|-----|------------|
-| http://localhost:9090 | Prometheus UI и targets |
-| http://localhost:3001 | Grafana (логин/пароль по умолчанию `admin` / `admin`, см. `GRAFANA_*` в compose) |
-| http://localhost:3100 | Loki HTTP API |
-| http://localhost:12345 | Alloy HTTP (метрики Alloy) |
-
-Проверка метрик приложения: `curl -s http://localhost:8080/metrics | head` (или порт из `HTTP_PORT`). В Grafana после старта уже подключены datasources **Prometheus** и **Loki** и три дашборда в папке **GoFlow**: *Backend Overview*, *Realtime / Messaging*, *Logs Overview*. LogQL в логах использует метку `container_name` (подбор `.*app.*` для сервиса `app` в compose).
-
-Конфиги как код: `deployments/prometheus/prometheus.yml`, `deployments/loki/loki-config.yaml`, `deployments/alloy/config.alloy`, `deployments/grafana/provisioning/`, `deployments/grafana/dashboards/*.json`.
-
-Логи приложения: при `LOG_FORMAT=json` (в compose для `app` по умолчанию) в stdout идёт JSON со полями `service`, `env`, `time`, `level`, `msg` / `message` и полями HTTP в middleware (`http.method`, `http.path`, `http.status`, …). Секреты и токены в лог не пишутся.
-
-## HTTP API (основные endpoints)
-
-| Метод | Путь | Auth | Описание |
-|--------|------|------|----------|
-| GET | `/health` | нет | Liveness |
-| GET | `/metrics` | нет | Prometheus scrape (метрики процесса + HTTP/WS/auth/messages/outbox/Kafka) |
-| POST | `/auth/register` | нет | Регистрация |
-| POST | `/auth/login` | нет | Логин, выдача токенов |
-| POST | `/auth/refresh` | нет | Обновление access; **rotation** refresh (старый отзывается, в теле ответа новый `refresh_token`) |
-| POST | `/auth/logout` | нет | Выход (текущая сессия) |
-| POST | `/auth/logout-all` | Bearer | Завершить все сессии |
-| GET/PATCH | `/users/me` | Bearer | Профиль |
-| GET | `/users/search` | Bearer | Поиск пользователей (без `password_hash` в SQL) |
-| GET | `/users/{id}` | Bearer | Публичные поля пользователя по id |
-| GET | `/chats` | Bearer | Список чатов |
-| POST | `/chats/direct` | Bearer | Direct-чат |
-| POST | `/chats/group` | Bearer | Группа |
-| GET | `/chats/{chat_id}` | Bearer | Карточка чата |
-| GET/POST | `/chats/{chat_id}/members` | Bearer | Участники / добавить |
-| DELETE | `/chats/{chat_id}/members/{user_id}` | Bearer | Исключить участника |
-| GET | `/chats/{chat_id}/messages` | Bearer | История сообщений |
-| POST | `/chats/{chat_id}/messages` | Bearer | Отправить сообщение |
-| GET/PATCH/DELETE | `/messages/{message_id}` | Bearer | Сообщение / правка / удаление |
-| POST | `/messages/{message_id}/read` | Bearer | Прочитано |
-| POST | `/ws/ticket` | Bearer | Выдать короткоживущий одноразовый ticket для WS |
-| GET | `/ws/connect` | query `ticket=…` (лимит по IP) | WebSocket upgrade |
-
-Заголовок авторизации: `Authorization: Bearer <access_jwt>`.
-
-## WebSocket
-
-1. Получить **access** JWT через `POST /auth/login` (или register + login).
-2. `POST /ws/ticket` с `Authorization: Bearer <access>` → в ответе opaque **ticket** и `expires_in`.
-3. Подключиться: `GET /ws/connect?ticket=<ticket>` (JWT в query **не используется**).
-4. После upgrade соединение регистрируется в **Hub**. Ticket в Redis удаляется при успешном consume (**одноразовый**).
-5. Входящие кадры — JSON-команды; исходящие — envelope `{ "event", "data", "meta" }` (см. `docs/WS_CONTRACT_V1.md`). Исходящие по сообщениям: `message.created`, `message.updated`, `message.deleted`, `message.read_receipt`; входящее прочтение: **`message.read`** (имя отличается от receipt).
-6. **Межинстансовая** доставка событий сообщений: PostgreSQL **outbox** → relay → **Kafka** (ключ партиции — `chat_id` для порядка в рамках чата) → consumer в том же процессе → тот же envelope в Hub. Redis остаётся для presence/typing/tickets/rate limit; доменные события сообщений не «основной транспорт» через Redis-pubsub при включённом Kafka.
-
-При остановке сервера соединения закрываются на стороне сервера, клиенты получают обрыв read loop.
-
-## Kafka и outbox
-
-- Таблица `outbox_events`: запись в **той же транзакции**, что и изменение сообщения / read state (`MessageWriter` в Postgres).
-- Воркер **`OutboxRelay`** читает pending-строки, сериализует **`internal/kafka.DomainEvent`**, публикует в топик (по умолчанию `goflow.domain.events`) и помечает строку **published**.
-- Если `kafka.enabled: false`, relay шлёт envelope напрямую в локальный `Broadcaster` (удобно без брокера).
-- **`KafkaWSConsumer`**: для fan-out на **каждый** инстанс приложения процесс получает свой **уникальный** `consumer group` (`KAFKA_CONSUMER_GROUP` как префикс + UUID), иначе общая группа распределила бы партиции между репликами и часть WS-клиентов не увидела бы события. Читает топик и вызывает `Broadcaster.DeliverEnvelopeBytes` локально.
-
-Переменные: `KAFKA_ENABLED`, `KAFKA_BROKERS` (через запятую для нескольких), `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, плюс секция `kafka:` в YAML.
-
-## Конфигурация и env
-
-Файл по умолчанию: `configs/local.yaml`, путь переопределяется `CONFIG_PATH`.
-
-Переменные окружения (частичный список): `HTTP_PORT`, `POSTGRES_DSN`, `REDIS_ADDR`, `JWT_SECRET`, `JWT_ACCESS_TTL_SECONDS`, `JWT_REFRESH_TTL_SECONDS`, `RUN_MIGRATIONS_ON_STARTUP`, `KAFKA_ENABLED`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP`, `WS_ALLOWED_ORIGINS`, **`SERVICE_NAME`**, **`APP_ENV`**, **`LOG_FORMAT`** (`json` \| `text`), лимиты: `RATE_LIMIT_*`, в т.ч. `RATE_LIMIT_WS_CONNECT_PER_MINUTE` для выдачи ticket и upgrade. Для Grafana: `GRAFANA_PORT`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_ROOT_URL`.
-
-Секция YAML **`observability`** (`service_name`, `env`, `log_format`) дублирует часть настроек логов; env имеет приоритет при merge в `config.Load`.
-
-Секция YAML `rate_limit` (значения в **запросах в минуту на IP**); если в файле не задано или ≤0, подставляются дефолты в `config.Load` после merge с env.
-
-## Что умеет MVP (кратко)
-
-- Регистрация / вход / refresh / logout, JWT access + refresh-сессии в БД.
-- Пользователи: «я», обновление профиля, поиск, просмотр по id.
-- Чаты: direct (с дедупликацией пары), group, участники, последнее сообщение.
-- Сообщения: отправка, правка/удаление автором, ответы в рамках чата, read state; типы **text** и **system** в MVP (**image** / **file** отклоняются валидацией до вложений).
-- WebSocket: realtime-события, при наличии Redis — typing, presence, межинстансовая доставка через pub/sub.
-- Наблюдаемость: **Prometheus** (`/metrics`: HTTP latency/inflight/status_class, WS connections и события, auth, сообщения, outbox relay, Kafka consumer), структурированные логи (**JSON** в docker-compose), **Grafana** + **Loki** + **Grafana Alloy** в compose.
-- Логирование запросов, recovery от паник, единый JSON для ошибок API.
-- Ограничение частоты на чувствительных маршрутах и **аккуратное завершение** HTTP + WS + relay.
-
----
-
-Подробный разбор файлов и порядок разработки можно вести в wiki или отдельной доке; для демо достаточно этого README и рабочего `docker compose`.
+- OpenTelemetry distributed tracing (currently only metrics + structured logs with request-id)
+- Per-user / per-session rate limiting in addition to per-IP
+- Integration tests against ephemeral PostgreSQL (testcontainers)
+- Image / file message types end-to-end (S3-compatible object storage)
+- Per-user inbox cursors and unread counters
